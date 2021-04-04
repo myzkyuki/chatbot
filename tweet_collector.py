@@ -4,19 +4,24 @@ import re
 import time
 import socket
 import argparse
-from typing import Tuple
+from typing import Tuple, Dict
 
 import requests_oauthlib
 import emoji
 import neologdn
+import pandas as pd
 
-from models.encoder_decoder import build_tokenizer
+from model import build_tokenizer
 from logger import logger
 
 MAX_ATTEMPTS = 10
 WAIT_SEC = 30
 MIN_SLEEP_SEC = 2
 MIN_CHARS = 2
+LANGUAGE = 'ja'
+SEARCH_RATE_LIMIT = 180
+LOOKUP_RATE_LIMIT = 900
+RATE_LIMIT_INTERVAL_SEC = 15 * 60
 
 BASE_TIMESTAMP = 1288834974657
 RATE_LIMIT_URL = 'https://api.twitter.com/1.1/application/rate_limit_status.json'
@@ -24,33 +29,35 @@ SEARCH_URL = 'https://api.twitter.com/1.1/search/tweets.json'
 LOOKUP_URL = 'https://api.twitter.com/1.1/statuses/lookup.json'
 
 # Regex patterns to format text
-screen_name_pattern = re.compile('@[\w_]+ *')
-hash_tag_pattern = re.compile('#[^ ]+ *')
-url_pattern = re.compile('https?://[\w/:%#\$&\?\(\)~\.=\+\-]+ *')
+screen_name_pattern = re.compile(r'@[\w_]+ *')
+hash_tag_pattern = re.compile(r'#[^ ]+ *')
+url_pattern = re.compile(r'https?://[\w/:%#\$&\?\(\)~\.=\+\-]+ *')
 emoji_pattern = re.compile(
     u"[\U0001F600-\U0001F64F\U0001F300-\U0001F5FF"
     u"\U0001F680-\U0001F6FF\U0001F1E0-\U0001F1FF]+", flags=re.UNICODE)
-period_pattern = re.compile('。+')
+period_pattern = re.compile(r'。。+')
+initial_period_pattern = re.compile(r'^。')
 valid_char_pattern = re.compile(r'[^、。!?ー〜1-9a-zA-Zぁ-んァ-ヶ亜-腕纊-黑一-鿕]')
-space_pattern = re.compile('\s+')
+space_pattern = re.compile(r'\s+')
+parenthesis_pattern = re.compile(r'\([^\(\)]+\)')
 
 
 class Conversation:
     def __init__(self, status_id: str, original_id: str, text: str):
-        self.status_ids = []
-        self.original_ids = []
-        self.texts = []
+        self.tweets = []
         self.latest_id = status_id
 
         self.add_status(status_id, original_id, text)
 
     def __len__(self) -> int:
-        return len(self.status_ids)
+        return len(self.tweets)
 
     def add_status(self, status_id: str, original_id: str, text: str):
-        self.status_ids.append(status_id)
-        self.original_ids.append(original_id)
-        self.texts.append(text)
+        self.tweets.insert(0, {
+            'status_id': status_id,
+            'original_id': original_id,
+            'text': text
+        })
 
 
 class TweetCollector:
@@ -61,8 +68,9 @@ class TweetCollector:
             client_key=api_key, client_secret=api_secret_key,
             resource_owner_key=access_token,
             resource_owner_secret=access_token_secret)
-        self.tokenizer = build_tokenizer(tokenizer_name)
+        self.tokenizer = build_tokenizer()
         self.max_token_length = max_token_length
+        self.known_status_ids = []
 
     @staticmethod
     def wait(sec: int):
@@ -87,7 +95,7 @@ class TweetCollector:
             raise Exception(f'Failed to connect to {url} '
                             f'more than max attempts ({MAX_ATTEMPTS}).')
 
-    def check_and_wait_rate_limit(self):
+    def check_and_wait_rate_limit(self, len_conversations):
         def get_remaining_and_reset(resource: dict):
             return resource['remaining'], resource['reset']
 
@@ -105,13 +113,27 @@ class TweetCollector:
             logger.info(f'[Remaining counts] search: {search_remaining}, '
                         f'lookup: {lookup_remaining}, limit: {limit_remaining}')
 
+            reset = min(search_reset, lookup_reset, limit_reset)
+            # curr = int(time.time())
+            # logger.info(f'curr: {curr}, reset: {reset-curr}, '
+            #             f'search_reset: {search_reset-curr}, '
+            #             f'lookup_reset: {lookup_reset-curr}, '
+            #             f'limit_reset: {limit_reset-curr}', )
+            reset_sec = reset - int(time.time())
             if min(search_remaining, lookup_remaining, limit_remaining) <= 1:
-                reset = max(search_reset, lookup_reset, limit_reset)
-                self.wait(reset - int(time.time()) + WAIT_SEC)
+                self.wait(reset_sec + WAIT_SEC)
             else:
                 break
         else:
             raise Exception('Failed to wait rate limit')
+
+        num_search = min(search_remaining,
+                         lookup_remaining // (len_conversations - 1),
+                         limit_remaining)
+        num_search = max(1, num_search - 1)
+        search_interval = reset_sec / num_search
+        search_interval = max(2, search_interval)
+        return search_interval
 
     @staticmethod
     def status_id_to_timestamp(status_id: int) -> int:
@@ -123,6 +145,8 @@ class TweetCollector:
         if text.startswith('RT '):
             return ''
 
+        text = text.replace('\n', '。')
+
         text = screen_name_pattern.sub('', text)
         text = hash_tag_pattern.sub('', text)
         text = url_pattern.sub('', text)
@@ -132,17 +156,26 @@ class TweetCollector:
         text = emoji_pattern.sub('。', text)
         text = ''.join(
             c if c not in emoji.UNICODE_EMOJI else '。' for c in text)
-        text = period_pattern.sub('。', text)
+
+        # Remove emoticons
+        text = parenthesis_pattern.sub('', text)
 
         # Normalize text
         text = neologdn.normalize(text, repeat=4)
         text = valid_char_pattern.sub('', text)
 
+        text = period_pattern.sub('。', text)
+        text = initial_period_pattern.sub('', text)
+        text = text.replace('!。', '!')
+        text = text.replace('。!', '!')
+        text = text.replace('?。', '?')
+        text = text.replace('。?', '?')
+
         return text
 
     def search_conversations(
             self, query: str, start_timestamp: int,
-            len_conversations: int) -> Tuple[int, dict, int]:
+            len_conversations: int) -> Tuple[int, Dict[str, Conversation], int]:
         """Search reply tweets include `query` strings after `start_timestamp`
         """
 
@@ -171,6 +204,9 @@ class TweetCollector:
             if status['in_reply_to_user_id'] == status['user']['id']:
                 continue
 
+            if status['lang'] != LANGUAGE:
+                continue
+
             text = self.format_text(status['full_text'])
             if len(text) < MIN_CHARS:
                 continue
@@ -196,11 +232,15 @@ class TweetCollector:
 
                 if status['in_reply_to_user_id'] == status['user']['id']:
                     continue
+                if status['lang'] != LANGUAGE:
+                    continue
 
                 text = self.format_text(status['full_text'])
                 if len(text) < MIN_CHARS:
                     continue
                 if len(self.tokenizer.encode(text)) > self.max_token_length:
+                    continue
+                if int(status_id) in self.known_status_ids:
                     continue
 
                 status_id = status['id_str']
@@ -214,49 +254,65 @@ class TweetCollector:
             if len(conversations) == 0:
                 break
 
+        for c in conversations.values():
+            self.known_status_ids += [int(t['status_id']) for t in c.tweets]
+
         return latest_timestamp, conversations, num_past_statuses
 
+    @staticmethod
+    def remove_duplicated_statuses(df):
+        duplicated_conversations = df.loc[
+            df.duplicated(subset='status_id'), 'conversation_id']
+        is_duplicated = df['conversation_id'].isin(duplicated_conversations)
+        df = df[~is_duplicated]
 
-def main(args):
-    collector = TweetCollector(
-        api_key=args.api_key, api_secret_key=args.api_secret_key,
-        access_token=args.access_token,
-        access_token_secret=args.access_token_secret,
-        tokenizer_name=args.tokenizer_name,
-        max_token_length=args.max_token_length)
+        return df, sum(is_duplicated)
 
-    start_timestamp = BASE_TIMESTAMP
-    os.makedirs(args.output_dir, exist_ok=True)
-    filename = f'tweet_conversations_{args.query}_{args.len_conversations}.tsv'
-    filename = os.path.join(args.output_dir, filename)
-    total_conversations = 0
-    sleep_sec = MIN_SLEEP_SEC
-    while True:
-        process_start = time.time()
-        collector.check_and_wait_rate_limit()
-        start_timestamp, conversations, num_past_tweet = \
-            collector.search_conversations(
-                query=args.query, start_timestamp=start_timestamp,
-                len_conversations=args.len_conversations)
+    def read_file(self, filepath):
+        if os.path.isfile(filepath):
+            df = pd.read_table(filepath, names=(
+                'conversation_id', 'status_id', 'original_id', 'sentence'))
+            df, num_removed = self.remove_duplicated_statuses(df)
+            if num_removed > 0:
+                logger.info(f'Drop {num_removed} duplicated conversations.')
+                df.to_csv(filepath, sep='\t', index=False, header=False)
 
-        with open(filename, 'a', encoding='utf-8') as f:
-            for c in conversations.values():
-                line = '\t'.join(c.texts) + '\n'
-                f.write(line)
+            num_conversations = len(df['conversation_id'].drop_duplicates())
+            self.known_status_ids = df['status_id'].values.tolist()
+        else:
+            num_conversations = 0
 
-        total_conversations += len(conversations)
-        logger.info(f'[Stats] total: {total_conversations}, '
-                    f'current: {len(conversations)}')
+        return num_conversations
 
-        process_sec = time.time() - process_start
-        if process_sec < sleep_sec:
-            collector.wait(sleep_sec - process_sec)
-            if num_past_tweet > 0:
-                sleep_sec += 1
-            elif num_past_tweet == 0 and sleep_sec > MIN_SLEEP_SEC:
-                sleep_sec -= 1
-            # logger.info(f'Set sleep sec to {sleep_sec} due to '
-            #             f'{num_past_tweet} duplicated tweets')
+    def collect(self, output_dir: str, query: str, len_conversations: int):
+        start_timestamp = BASE_TIMESTAMP
+        os.makedirs(output_dir, exist_ok=True)
+        filename = f'tweet_conversations_{len_conversations}.tsv'
+        filename = os.path.join(output_dir, filename)
+        total_conversations = self.read_file(filename)
+        while True:
+            process_start = time.time()
+            sleep_sec = collector.check_and_wait_rate_limit(len_conversations)
+            start_timestamp, conversations, num_past_tweet = \
+                self.search_conversations(
+                    query=query, start_timestamp=start_timestamp,
+                    len_conversations=len_conversations)
+
+            with open(filename, 'a', encoding='utf-8') as f:
+                for c in conversations.values():
+                    for t in c.tweets:
+                        line = '\t'.join(
+                            [c.latest_id, t['status_id'],
+                             t['original_id'], t['text']]) + '\n'
+                        f.write(line)
+
+            total_conversations += len(conversations)
+            logger.info(f'[Stats] total: {total_conversations}, '
+                        f'current: {len(conversations)}')
+
+            process_sec = time.time() - process_start
+            if process_sec < sleep_sec:
+                collector.wait(sleep_sec - process_sec)
 
 
 if __name__ == '__main__':
@@ -273,10 +329,18 @@ if __name__ == '__main__':
                         help='Query to search tweets')
     parser.add_argument('--len_conversations', type=int, default=5,
                         help='Length of conversations to collect')
-    parser.add_argument('--max_token_length', type=int, default=256)
+    parser.add_argument('--max_token_length', type=int, default=128)
     parser.add_argument('--tokenizer_name', type=str,
                         default='cl-tohoku/bert-base-japanese-whole-word-masking')
     parser.add_argument('--output_dir', type=str, default='dataset/tweet_data')
     args = parser.parse_args()
-    main(args)
+
+    collector = TweetCollector(
+        api_key=args.api_key, api_secret_key=args.api_secret_key,
+        access_token=args.access_token,
+        access_token_secret=args.access_token_secret,
+        tokenizer_name=args.tokenizer_name,
+        max_token_length=args.max_token_length)
+    collector.collect(output_dir=args.output_dir, query=args.query,
+                      len_conversations=args.len_conversations)
 

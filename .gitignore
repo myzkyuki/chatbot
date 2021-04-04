@@ -1,0 +1,21 @@
+# Python
+__pycache__
+.mypy_cache
+*.ipynb
+.ipynb_checkpoints
+
+# TensorFlow
+checkpoint
+*.index
+*.data-*
+events.out.tfevents.*
+*.pb
+
+# Data
+*.tsv
+
+# IDE
+.idea
+
+# OS
+.DS_Store
