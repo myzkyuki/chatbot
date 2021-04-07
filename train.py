@@ -17,7 +17,7 @@ def train(epochs: int, model: tf.keras.models.Model,
           dataloader: DataLoader, log_dir: str, hidden_size: int):
     total_steps = epochs * dataloader.steps_per_epoch
     start_steps = 0
-    checkpoint = tf.train.Checkpoint(model=model, optimizer=opt)
+    checkpoint = tf.train.Checkpoint(model=model, opt=opt)
     ckpt_dir = os.path.join(log_dir, 'checkpoints')
     ckpt_manager = tf.train.CheckpointManager(
         checkpoint, directory=ckpt_dir, max_to_keep=1)
@@ -45,7 +45,9 @@ def train(epochs: int, model: tf.keras.models.Model,
     @tf.function(input_signature=train_step_signature)
     def train_step(inputs):
         batch_size = tf.shape(inputs[0])[0]
-        mem = tf.zeros((batch_size, dataloader.max_token_length, hidden_size), dtype=tf.float32)
+        mem = tf.zeros(
+            (batch_size, dataloader.max_token_length, hidden_size),
+            dtype=tf.float32)
 
         with tf.GradientTape() as tape:
             loss = 0

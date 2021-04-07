@@ -3,7 +3,6 @@ import tensorflow as tf
 
 from model import build_tokenizer
 
-
 class Chat:
     def __init__(self, model_path: str, max_token_length: int,
                  hidden_size: int, disable_memory: bool):
@@ -31,7 +30,7 @@ class Chat:
         while True:
             sentence = input('YOU: ')
             reply = self.get_reply(sentence)
-            print('BOT: ' + reply)
+            print('\033[32mBOT: ' + reply + '\033[0m')
 
 
 if __name__ == '__main__':

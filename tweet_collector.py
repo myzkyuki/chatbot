@@ -62,8 +62,7 @@ class Conversation:
 
 class TweetCollector:
     def __init__(self, api_key: str, api_secret_key: str, access_token: str,
-                 access_token_secret: str, tokenizer_name: str,
-                 max_token_length: int):
+                 access_token_secret: str, max_token_length: int):
         self.session = requests_oauthlib.OAuth1Session(
             client_key=api_key, client_secret=api_secret_key,
             resource_owner_key=access_token,
@@ -327,11 +326,9 @@ if __name__ == '__main__':
                         help='Twitter access token secret')
     parser.add_argument('--query', type=str, required=True,
                         help='Query to search tweets')
-    parser.add_argument('--len_conversations', type=int, default=5,
+    parser.add_argument('--len_conversations', type=int, default=7,
                         help='Length of conversations to collect')
-    parser.add_argument('--max_token_length', type=int, default=128)
-    parser.add_argument('--tokenizer_name', type=str,
-                        default='cl-tohoku/bert-base-japanese-whole-word-masking')
+    parser.add_argument('--max_token_length', type=int, default=64)
     parser.add_argument('--output_dir', type=str, default='dataset/tweet_data')
     args = parser.parse_args()
 
@@ -339,7 +336,6 @@ if __name__ == '__main__':
         api_key=args.api_key, api_secret_key=args.api_secret_key,
         access_token=args.access_token,
         access_token_secret=args.access_token_secret,
-        tokenizer_name=args.tokenizer_name,
         max_token_length=args.max_token_length)
     collector.collect(output_dir=args.output_dir, query=args.query,
                       len_conversations=args.len_conversations)
