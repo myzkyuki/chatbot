@@ -11,6 +11,7 @@ EncoderにはBERT, ReminderとDecoderにはTransformerを利用しています�
 
 ## 実行例
 本コードによって得られたモデルの実行例です。
+
 <img src="docs/chat_example_.png" width="400">
 
 ## 実行方法
